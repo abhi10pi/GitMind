@@ -1,21 +1,95 @@
 services:
+
+  # ── PostgreSQL + pgvector ───────────────────────────────────────────────────
   postgres:
     image: pgvector/pgvector:pg16
     container_name: gitmind-postgres
     environment:
-      POSTGRES_DB: gitmind
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-gitmind}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
-      - "5433:5432"
+      - "5433:5432"          # host:5433 → container:5432
     volumes:
       - gitmind_pg_data:/var/lib/postgresql/data
       - ./docker/postgres/init-extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d gitmind"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-gitmind}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+    networks:
+      - gitmind-net
+
+  # ── Spring Boot backend ─────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gitmind-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database — use the Docker service name "postgres", not localhost
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-gitmind}
+      DB_USERNAME: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+
+      # AI provider — set to "groq" or "openai"
+      AI_PROVIDER: ${AI_PROVIDER:-groq}
+
+      # Groq — free chat (https://console.groq.com)
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_CHAT_MODEL: ${GROQ_CHAT_MODEL:-openai/gpt-oss-120b}
+
+      # OpenAI — optional chat fallback when AI_PROVIDER=openai
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4o-mini}
+
+      # Mistral — free embeddings (https://console.mistral.ai)
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      MISTRAL_EMBEDDING_MODEL: ${MISTRAL_EMBEDDING_MODEL:-mistral-embed}
+
+      # pgvector dimensions — 1024 for mistral-embed
+      PGVECTOR_DIMENSIONS: ${PGVECTOR_DIMENSIONS:-1024}
+
+      # GitHub OAuth2
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+
+      # CORS / session
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+      TOKEN_ENCRYPTOR_PASSWORD: ${TOKEN_ENCRYPTOR_PASSWORD:-gitmind-local-encrypt-key-change-me}
+      TOKEN_ENCRYPTOR_SALT: ${TOKEN_ENCRYPTOR_SALT:-deadbeefcafebabe}
+    ports:
+      - "8080:8080"
+    networks:
+      - gitmind-net
+
+  # ── Next.js frontend ────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+      args:
+        # Baked into the Next.js bundle at build time — must be the URL the
+        # *browser* uses to reach the backend (not the Docker service name).
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    container_name: gitmind-frontend
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    ports:
+      - "3000:3000"
+    networks:
+      - gitmind-net
+
+networks:
+  gitmind-net:
+    driver: bridge
 
 volumes:
   gitmind_pg_data:
